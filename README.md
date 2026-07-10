@@ -1,2 +1,2 @@
 # pbmc-suppression-assay-stats
-Codes to determine statistical significance in PBMC suppression assays
+Codes for analyzing statistical significance PBMC suppression assays from Leung & Lao et al., and Salim et al.
