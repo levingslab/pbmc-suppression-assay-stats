@@ -1,0 +1,167 @@
+---
+title: "Calculating statistical significance for datasets such as PBMC suppression assay data"
+output: html_document
+date: "2025-08-14"
+# written by: "Melissa Braschel"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load required packages
+library(readxl)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(writexl)
+library(dplyr)
+library(tidyr)
+library(broom.mixed)
+# library(rstatix)
+
+
+```
+
+
+
+```{r}
+
+# 1. Load and prepare data
+
+data <- read_excel("C:/Users/ye.shen/Downloads/Copy of For Discussion 2025-08-14.xlsx",
+                   sheet = "Raw data")
+
+data <- data %>%
+  mutate(
+    Pt_ID = factor(Pt_ID),
+    Cell  = factor(Cell, levels = c("Treg", "Tconv")),
+    Ratio = factor(Ratio, levels = c("1to2.5", "1to5", "1to10",
+                                     "1to20", "1to40", "1to80"))
+  )
+
+
+# 2. Paired t-tests with Sidak correction
+
+pairwise_results <- data %>%
+  group_by(Ratio) %>%
+  rstatix::t_test(CD80 ~ Cell, paired = TRUE, detailed = TRUE) %>%
+  ungroup()
+
+# Sample sizes per group
+group_sizes <- data %>%
+  group_by(Ratio, Cell) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pivot_wider(names_from = Cell, values_from = n)
+
+pairwise_results <- pairwise_results %>%
+  left_join(group_sizes, by = "Ratio")
+
+# Sidak correction
+m_total <- nrow(pairwise_results)
+sidak_adjust <- function(p, m) 1 - (1 - p)^m
+alpha <- 0.05
+alpha_sid <- 1 - (1 - alpha)^(1 / m_total)
+
+pairwise_results <- pairwise_results %>%
+  mutate(
+    p.adj.sidak  = sidak_adjust(p, m_total),
+    t_crit_raw   = qt(1 - alpha/2, df),
+    se           = (conf.high - estimate) / t_crit_raw,
+    t_crit_sidak = qt(1 - alpha_sid/2, df),
+    conf.low.adj  = estimate - t_crit_sidak * se,
+    conf.high.adj = estimate + t_crit_sidak * se,
+    estimate        = sprintf("%.2f", estimate),
+    se              = sprintf("%.2f", se),
+    conf.low        = sprintf("%.2f", conf.low),
+    conf.high       = sprintf("%.2f", conf.high),
+    conf.low.adj    = sprintf("%.2f", conf.low.adj),
+    conf.high.adj   = sprintf("%.2f", conf.high.adj),
+    statistic       = sprintf("%.2f", statistic),
+    p       = ifelse(p < 0.0001, "<0.0001", sprintf("%.4f", p)),
+    p.adj.sidak = ifelse(p.adj.sidak < 0.0001, "<0.0001", sprintf("%.4f", p.adj.sidak))
+  ) %>%
+  select(Ratio, group1, group2, n1, n2, statistic, df,
+         estimate, se, p, conf.low, conf.high,
+         p.adj.sidak, conf.low.adj, conf.high.adj)
+
+paired_ttest_results <- pairwise_results
+
+
+# 3. Simple mixed-effects model (random intercept only)
+
+mod_simple <- lmer(CD80 ~ Cell * Ratio + (1 | Pt_ID), data = data)
+emm_simple <- emmeans(mod_simple, ~ Cell | Ratio)
+pw_simple <- contrast(emm_simple, method = "pairwise", adjust = "none")
+
+m_contrasts_simple <- nrow(as.data.frame(pw_simple))
+alpha_sid_simple <- 1 - (1 - alpha)^(1 / m_contrasts_simple)
+
+mixed_simple_results <- as.data.frame(pw_simple) %>%
+  mutate(
+    t_crit_orig   = qt(1 - alpha/2, df),
+    conf.low.orig  = estimate - t_crit_orig * SE,
+    conf.high.orig = estimate + t_crit_orig * SE,
+    t_crit_sidak  = qt(1 - alpha_sid_simple/2, df),
+    conf.low.adj  = estimate - t_crit_sidak * SE,
+    conf.high.adj = estimate + t_crit_sidak * SE,
+    p.adj.sidak   = 1 - (1 - p.value)^m_contrasts_simple,
+    p.value     = ifelse(p.value < 0.0001, "<0.0001", sprintf("%.4f", p.value)),
+    p.adj.sidak = ifelse(p.adj.sidak < 0.0001, "<0.0001", sprintf("%.4f", p.adj.sidak)),
+    estimate       = sprintf("%.2f", estimate),
+    SE             = sprintf("%.2f", SE),
+    conf.low.orig  = sprintf("%.2f", conf.low.orig),
+    conf.high.orig = sprintf("%.2f", conf.high.orig),
+    conf.low.adj   = sprintf("%.2f", conf.low.adj),
+    conf.high.adj  = sprintf("%.2f", conf.high.adj)
+  ) %>%
+  select(contrast, Ratio, estimate, SE, df,
+         p.value, conf.low.orig, conf.high.orig,
+         p.adj.sidak, conf.low.adj, conf.high.adj)
+
+
+# 4. Complex mixed-effects model (random slopes)
+
+mod_complex <- lmer(CD80 ~ Cell * Ratio + (1 + Cell + Ratio | Pt_ID), data = data)
+emm_complex <- emmeans(mod_complex, ~ Cell | Ratio)
+pw_complex <- contrast(emm_complex, method = "pairwise", adjust = "none")
+
+m_contrasts_complex <- nrow(as.data.frame(pw_complex))
+alpha_sid_complex <- 1 - (1 - alpha)^(1 / m_contrasts_complex)
+
+mixed_complex_results <- as.data.frame(pw_complex) %>%
+  mutate(
+    t_crit_orig   = qt(1 - alpha/2, df),
+    conf.low.orig  = estimate - t_crit_orig * SE,
+    conf.high.orig = estimate + t_crit_orig * SE,
+    t_crit_sidak  = qt(1 - alpha_sid_complex/2, df),
+    conf.low.adj  = estimate - t_crit_sidak * SE,
+    conf.high.adj = estimate + t_crit_sidak * SE,
+    p.adj.sidak   = 1 - (1 - p.value)^m_contrasts_complex,
+    p.value     = ifelse(p.value < 0.0001, "<0.0001", sprintf("%.4f", p.value)),
+    p.adj.sidak = ifelse(p.adj.sidak < 0.0001, "<0.0001", sprintf("%.4f", p.adj.sidak)),
+    estimate       = sprintf("%.2f", estimate),
+    SE             = sprintf("%.2f", SE),
+    conf.low.orig  = sprintf("%.2f", conf.low.orig),
+    conf.high.orig = sprintf("%.2f", conf.high.orig),
+    conf.low.adj   = sprintf("%.2f", conf.low.adj),
+    conf.high.adj  = sprintf("%.2f", conf.high.adj)
+  ) %>%
+  select(contrast, Ratio, estimate, SE, df,
+         p.value, conf.low.orig, conf.high.orig,
+         p.adj.sidak, conf.low.adj, conf.high.adj)
+
+
+# 5. Export only the paired t-test and simple mixed results to Excel, as the complex mixed model shows singularity
+
+output_file <- "C:/Users/ye.shen/Downloads/analysis_results_2models.xlsx"
+
+writexl::write_xlsx(
+  list(
+    paired_ttests = paired_ttest_results,
+    mixed_simple  = mixed_simple_results
+  ),
+  path = output_file
+)
+
+```
+
